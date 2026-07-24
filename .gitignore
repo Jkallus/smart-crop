@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.env
+.DS_Store
+test_batch/
+test_batch_output/
+test_batch_log.jsonl
+test_batch_run.log
+
+# sample/test photos -- never commit real photos to this repo
+*.jpg
+*.jpeg
+*.JPG
+*.JPEG
