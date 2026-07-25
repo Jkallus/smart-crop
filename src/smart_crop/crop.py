@@ -1,5 +1,6 @@
 """Deterministic crop-box math and execution. See agent_spec.md for the model."""
 
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -58,7 +59,8 @@ def apply_crop(
         return None
 
     with Image.open(source_path) as img:
-        box = crop_box(img.width, img.height, target, decision)
+        source_w, source_h = img.width, img.height
+        box = crop_box(source_w, source_h, target, decision)
         left, top, right, bottom = box
         box_w, box_h = right - left, bottom - top
 
@@ -67,12 +69,30 @@ def apply_crop(
                 f"{target.name} crop is {box_w}x{box_h}, below floor {target.min_w}x{target.min_h}"
             )
 
-        cropped = img.crop(box)
-
         dest_dir = output_dir / target.folder
         dest_dir.mkdir(parents=True, exist_ok=True)
         dest_name = f"{source_path.stem}{suffix}{source_path.suffix}"
         dest_path = dest_dir / dest_name
-        cropped.save(dest_path, quality=95)
+
+        if box == (0, 0, source_w, source_h):
+            # Full-frame passthrough -- e.g. a 4:3 drone source against the ipad target at
+            # scale=1.0, where source and target ratios already match and there's nothing to trim.
+            # Copy the original bytes directly rather than a lossy decode/crop/re-encode round
+            # trip that would produce a pixel-identical result anyway.
+            shutil.copy2(source_path, dest_path)
+            return dest_path
+
+        cropped = img.crop(box)
+        # quality=100 + subsampling=0 (4:4:4, no chroma downsampling) minimizes re-encode loss from
+        # the unavoidable decode/crop/encode cycle; icc_profile/exif preserve color space + metadata
+        # that PIL otherwise silently drops on save.
+        cropped.save(
+            dest_path,
+            quality=100,
+            subsampling=0,
+            optimize=True,
+            icc_profile=img.info.get("icc_profile"),
+            exif=img.info.get("exif"),
+        )
 
     return dest_path

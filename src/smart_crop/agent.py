@@ -23,9 +23,18 @@ within a narrower crop.
 
 For tv, macbook, ultrawide, and ipad: default to scale 1.0 (keep maximum resolution). Your only \
 real decision is where to position the crop on the axis being trimmed (cy for tv/macbook/ultrawide, \
-which crop height; cx for ipad, which crops width). Use sky/foreground/horizon balance to choose \
-the position. These should almost always be worthwhile; mark worthwhile false only if literally no \
-crop position preserves a coherent image.
+which crop height; cx for ipad, which crops width). Before choosing that position, first identify \
+the full extent (topmost/bottommost, or leftmost/rightmost for ipad) of every discrete subject you \
+want to keep -- a boat's mast, a bridge deck and towers, a rock formation's peak, a building or \
+skyline, an animal's head, a ridgeline. Then choose the position that keeps each such subject \
+entirely inside the crop box, even if that means the crop looks less "centered" or leaves more \
+empty sky/water/foreground on one side than the other. Clipping through part of a subject (a boat \
+missing its mast, a bridge missing a tower, a rock formation missing its top, an animal missing its \
+head) is a worse failure than an unevenly balanced crop of empty space -- sky, water, and flat \
+ground can be trimmed freely, discrete subjects cannot. Only fall back to a purely balance-based \
+position when there is no single discrete subject near either edge to protect. These should almost \
+always be worthwhile; mark worthwhile false only if literally no crop position preserves a coherent \
+image (e.g. every position clips through some subject no matter where you place it).
 
 Important: if the source's aspect ratio already exactly matches a target (e.g. a 4:3 drone photo \
 for the ipad target), then at scale 1.0 there is zero room to move on *either* axis -- the crop is \

@@ -1,4 +1,8 @@
-from smart_crop.crop import CropDecision, crop_box
+import filecmp
+
+from PIL import Image
+
+from smart_crop.crop import CropDecision, apply_crop, crop_box
 from smart_crop.ratios import TARGETS
 
 
@@ -38,3 +42,16 @@ def test_box_never_exceeds_source_bounds():
     left, top, right, bottom = box
     assert left >= 0 and right <= 6000
     assert top >= 0 and bottom <= 4000
+
+
+def test_matching_ratio_apply_crop_copies_bytes_unchanged(tmp_path):
+    # A full-frame passthrough (source ratio == target ratio, scale 1.0) should be a byte-for-byte
+    # copy of the original file, not a decode/crop/re-encode round trip -- see crop.py.
+    source_path = tmp_path / "source.jpg"
+    Image.new("RGB", (4000, 3000), color=(120, 60, 200)).save(source_path, quality=100)
+
+    dest_path = apply_crop(
+        source_path, TARGETS["ipad"], CropDecision(target="ipad", worthwhile=True), tmp_path / "out"
+    )
+
+    assert filecmp.cmp(source_path, dest_path, shallow=False)

@@ -15,14 +15,23 @@ for each; deterministic Python does the pixel math. Replaces a manual Lightroom 
 - `ratios.py` -- the 5 `Target`s (ratio, output folder, min resolution floor).
 - `crop.py` -- `CropDecision` dataclass, `crop_box()` (pure math, well-tested), `apply_crop()`
   (does the actual crop + save, raises `ResolutionFloorError` as a safety net independent of the
-  model's own judgment).
+  model's own judgment). Saves at `quality=100`/`subsampling=0`/`optimize=True` and preserves
+  ICC profile + EXIF, to minimize loss from the unavoidable decode/crop/re-encode cycle. When the
+  computed crop box is the full source frame (source and target ratios already match at
+  `scale=1.0`, e.g. a 4:3 drone photo against `ipad`), it skips the decode/encode entirely and
+  `shutil.copy2`s the original bytes instead.
 - `preview.py` -- downsizes + base64-encodes an image for the vision model; the full-res original
   is only ever touched by `apply_crop`, never sent to the model.
 - `backends.py` -- named model configs (`BACKENDS` dict). Add a new model by adding an entry here.
 - `agent.py` -- the system prompt, tool schema, and `get_crop_plan()` (one model, one image ->
-  `dict[str, list[CropDecision]]`). Also a single-backend CLI.
-- `compare.py` -- runs N backends over a batch concurrently, writes a JSONL decision log with
-  `flags.py`-derived review flags, CLI entry point for real batches.
+  `dict[str, list[CropDecision]]`). Also a single-backend CLI. All 5 targets (and any `iphone`
+  multi-candidate entries) come back from a single tool call in a single model request -- the
+  model reasons about all targets holistically in one context, never one call per target.
+- `compare.py` -- runs N backends over a batch, pipelined per-image (crops + logs an image as soon
+  as every requested backend has returned for it, rather than waiting for the whole batch to finish
+  analysis before cropping anything), writes a JSONL decision log with `flags.py`-derived review
+  flags and per-call `duration_s` timing (plus a per-backend avg/min/max summary at the end), CLI
+  entry point for real batches.
 - `flags.py` -- cheap, geometry-only heuristics (no image content inspection) for flagging
   decisions worth a human look: unused coordinates, low scale, edge anchors, cross-backend
   disagreement. This is what makes batches of hundreds of images tractable to review.
@@ -41,10 +50,14 @@ for each; deterministic Python does the pixel math. Replaces a manual Lightroom 
   (see agent_spec.md). Don't assume `len(decisions) == 1`.
 - All model calls go through `backends.py`'s `Backend`/`client_for` -- never hardcode a base_url or
   API key. `OMLX_API_KEY` must be set in the environment; never write it to a file.
-- `compare.py` dispatches concurrently (`ThreadPoolExecutor`, `MAX_WORKERS = 8`, benchmarked). Both
+- `compare.py` dispatches concurrently (`ThreadPoolExecutor`, `MAX_WORKERS = 8`, benchmarked only
+  against sequential, not swept against other worker counts -- true optimum unconfirmed). Both
   models currently stay resident in oMLX simultaneously -- if that stops being true (memory
   pressure, a third model added), model-swap thrashing becomes a real risk again; see
-  `agent_spec.md`'s history section before assuming concurrency is free.
+  `agent_spec.md`'s history section before assuming concurrency is free. Jobs are queued
+  image-major (all backends for image N before image N+1) -- the thread pool's work queue is FIFO,
+  so backend-major ordering would starve the per-image pipelining (nothing becomes "ready" to crop
+  until nearly a full backend pass completes).
 - Sample/test images (loose `.jpg` files, `test_batch/`) are gitignored -- don't commit real photos
   to this repo.
 
@@ -61,3 +74,8 @@ for each; deterministic Python does the pixel math. Replaces a manual Lightroom 
   underlying behavioral difference between two models often repeats identically across
   `tv`/`macbook`/`ultrawide` for one image, since they share the same crop axis. Not yet
   de-duplicated -- see `HANDOFF.md` for current status.
+- Gemma has a reasoning bug on portrait-source-to-landscape-target crops: it sometimes rejects
+  `tv`/`macbook`/`ultrawide`/`ipad` on a portrait-orientation source with reasoning like "would
+  require extending the frame," which is factually wrong -- that crop just trims height hard, it
+  never needs to extend anything. Qwen doesn't have this bug on the same images. Not yet fixed;
+  found via real-batch review, see `HANDOFF.md`.

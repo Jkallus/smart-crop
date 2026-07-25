@@ -64,7 +64,7 @@ Plus a resolution floor check as a safety net (reject/log, don't silently export
 
 > You are evaluating a single landscape photograph against five export targets: tv (16:9), macbook (16:10), ultrawide (5120:2160), ipad (4:3), and iphone (9:19.5 portrait). These are landscape photographs — do not reason about how people are framed; reason about composition, horizon placement, sky/foreground balance, and whether a coherent subject exists within a narrower crop.
 >
-> For **tv, macbook, ultrawide, ipad** (the four ratios close to or wider than typical source ratios): default to `scale: 1.0` — keep maximum resolution. Your only real decision is where to position the crop on the axis being trimmed (`cy` for tv/macbook/ultrawide since they crop height; `cx` for ipad since it crops width, unless the source is already 4:3). Use sky/foreground/horizon balance to choose the position. These should almost always be `worthwhile: true` — mark `false` only if literally no crop position preserves a coherent image (rare).
+> For **tv, macbook, ultrawide, ipad** (the four ratios close to or wider than typical source ratios): default to `scale: 1.0` — keep maximum resolution. Your only real decision is where to position the crop on the axis being trimmed (`cy` for tv/macbook/ultrawide since they crop height; `cx` for ipad since it crops width, unless the source is already 4:3). Before choosing that position, identify the full extent of every discrete subject you want to keep (a boat's mast, a bridge deck and towers, a rock formation's peak, a skyline, an animal's head, a ridgeline) and pick the position that keeps each one entirely inside the box, even at the cost of an unevenly balanced crop of empty sky/water/ground. Clipping through part of a subject is a worse failure than uneven empty space. Only fall back to pure sky/foreground/horizon balance when no discrete subject sits near either edge. These should almost always be `worthwhile: true` — mark `false` only if literally no crop position preserves a coherent image (rare).
 >
 > For **iphone** (portrait, the most aggressive crop): default to keeping full height (`scale: 1.0`, `cy` irrelevant) and choose `cx` to find a vertically coherent slice of the frame — a tree, rock formation, waterfall, path, or other subject/line that reads well in a narrow vertical crop. If no such slice exists — the interesting content is spread horizontally with nothing that isolates well vertically — set `worthwhile: false`. Only drop `scale` below 1.0 for a deliberate, clearly-improved zoom on an isolated vertical subject; do not zoom just to "make something work" — a mediocre crop is worse than no crop.
 >
@@ -104,6 +104,18 @@ Two failure modes found via real-image testing, now covered in the system prompt
 
 Neither required a schema change, just tighter prompt wording -- verified against the images that
 originally exposed the problems.
+
+A third failure mode, found in a 2026-07-24 review of a `test_batch` run: both backends'
+**ultrawide** decisions repeatedly clipped a discrete subject near the top or bottom edge of the
+frame (a boat's mast, a bridge's deck/tower, a rock formation's peak, the Sydney Opera
+House/skyline, an animal's head, a hillside ridge) while leaving in a disproportionate amount of
+empty sky or water on the other side -- i.e. "balance" framing was winning out over "don't cut the
+subject." Same failure on both `tv`/`macbook`/`ipad` positioning logic (they share the `cy`/`cx`
+math with ultrawide), just observed concretely on ultrawide crops first. Fixed by tightening the
+tv/macbook/ultrawide/ipad prompt paragraph to require identifying each discrete subject's full
+extent *before* choosing a position, and treating a clipped subject as strictly worse than an
+unevenly balanced crop of empty space. Not yet re-validated against a fresh batch run -- do that
+before considering this closed.
 
 ## Open items
 
