@@ -36,6 +36,11 @@ judged worth producing for this image, which isn't always the case (see `agent_s
 target gets skipped). Images here are downsized for the repo; real output stays at full source
 resolution except where a target's own aspect ratio requires cropping.
 
+This image is also a real example of the multi-candidate `iphone` case: the model proposed a
+second vertical crop isolating just the Opera House, which the second-pass review gate rejected as
+not a strong enough standalone composition on its own -- the bridge crop shown below is the
+candidate that passed.
+
 | Original | |
 |---|---|
 | ![original](docs/example/original.jpg) | |
