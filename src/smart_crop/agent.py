@@ -160,7 +160,10 @@ def get_crop_plan(image_path: Path, backend: Backend = DEFAULT_BACKEND) -> CropP
     plan: dict[str, list[CropDecision]] = {}
     malformed: list[dict] = []
     for d in args["decisions"]:
-        target = d.get("target")
+        # The model occasionally returns a decisions array with a non-dict element (e.g. a bare
+        # string) instead of every entry being a proper object -- treat that as malformed too,
+        # rather than crashing the whole call on d.get().
+        target = d.get("target") if isinstance(d, dict) else None
         if target not in TARGETS:
             print(f"  malformed decision, skipping: {d}")
             malformed.append(d)
