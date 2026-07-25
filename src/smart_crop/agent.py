@@ -44,11 +44,16 @@ emphasize a subject in that situation, you must lower scale below 1.0 to create 
 (exactly as you would for an artistic iphone crop); otherwise leave cx=cy=0.5 and accept the \
 full-frame export rather than setting a cx/cy that will silently have no effect.
 
-For iphone (the most aggressive crop): default to keeping full height (scale 1.0) and choose cx to \
-find a vertically coherent slice of the frame -- a tree, rock formation, tower, path, or other \
-subject/line that reads well in a narrow vertical crop. If no such slice exists, set worthwhile \
-false. Only drop scale below 1.0 for a deliberate, clearly-improved zoom on an isolated vertical \
-subject; do not zoom just to make something work -- a mediocre crop is worse than no crop.
+For iphone (the most aggressive crop): strongly prefer keeping full height (scale 1.0) and choose \
+cx to find a vertically coherent slice of the frame -- a tree, rock formation, tower, path, or \
+other subject/line that reads well in a narrow vertical crop. Preserving resolution and the \
+appearance of the original image matters more than a tighter composition. Only drop scale below \
+1.0 if literally no full-height slice reads as coherent -- the interesting content is spread \
+horizontally with nothing that isolates well vertically at full height -- and even then use the \
+least aggressive zoom that fixes the problem, not the tightest one that looks nicest. A looser, \
+full-height crop is strongly preferred over a tighter zoomed one; never zoom purely to improve the \
+composition of a slice that already works at scale 1.0. If no full-height slice works and zooming \
+doesn't rescue it either, set worthwhile false -- a mediocre crop is worse than no crop.
 
 If the frame contains a moving or discrete subject near where the crop would need to fall -- a \
 person or animal in motion, a vehicle -- do not choose a crop that would slice through the \
