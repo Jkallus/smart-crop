@@ -114,17 +114,73 @@ subject." Same failure on both `tv`/`macbook`/`ipad` positioning logic (they sha
 math with ultrawide), just observed concretely on ultrawide crops first. Fixed by tightening the
 tv/macbook/ultrawide/ipad prompt paragraph to require identifying each discrete subject's full
 extent *before* choosing a position, and treating a clipped subject as strictly worse than an
-unevenly balanced crop of empty space. Not yet re-validated against a fresh batch run -- do that
-before considering this closed.
+unevenly balanced crop of empty space. Re-validated against two fresh 100-image batch runs after
+the fix -- `disagreement:cy` dropped rather than rose, confirming the fix generalized rather than
+just covering the originally-flagged images.
+
+A fourth round of feedback, from user review of a `test-batch-2` run (2026-07-25), covered three
+more `iphone`-specific issues, all fixed by prompt tightening only (no code changes):
+
+- **Take rate too high**: some accepted crops had a geometrically coherent slice but a subject too
+  small/distant within mostly empty space (e.g. two cows barely visible on a hillside) to actually
+  be a strong standalone portrait. The `iphone` paragraph now explicitly requires the subject be a
+  "clear, meaningful visual focus that fills a real portion of the frame," not just technically
+  coherent.
+- **Arbitrary mid-body cuts**: several accepted crops were fine to take but cut through an animal's
+  torso/legs at an arbitrary point instead of a natural breakpoint (below the shoulders, full body,
+  etc.), or clipped through signage/windows on a building rather than respecting an architectural
+  line. The existing "don't bisect a moving/discrete subject" guidance only covered the binary
+  take/skip decision, not *where* to cut when taking it -- generalized to require a natural
+  breakpoint when one exists, falling back to `worthwhile: false` only when no position offers one
+  and the subject's most essential recognizable part (e.g. an animal's head) can't be preserved
+  either.
+- **Multi-candidate blending unrelated elements**: one flagged `iphone_alt2` combined a building
+  (church tower) with unrelated street activity below it into a single candidate that didn't read
+  as one coherent subject. Multi-candidate guidance tightened to require each candidate focus on a
+  single coherent subject, not blend two loosely related scene elements.
+
+Verified by re-running the seven specific images the user flagged (across both backends) after the
+prompt change -- see git log for the before/after comparison at the time of the fix.
+
+## Second-pass review gate (iphone only)
+
+Implemented 2026-07-25, after prompt tuning alone stopped closing the gap on two `iphone`-specific
+judgment failures the user kept finding in real batches: take rate too high (a technically-coherent
+slice with a small/distant subject in mostly empty space) and multi-candidate crops blending two
+unrelated scene elements. This was the "self-review pass" idea from the original open-items list,
+scoped down to just `iphone` (the one target with these problems) to keep the cost increase small.
+
+Design: `agent.gate_iphone_crop()` runs after a first-pass `worthwhile: true` iphone decision, but
+before `apply_crop` actually writes it. It renders *only the cropped region* (via
+`preview.crop_preview_data_url`, not the whole source) and sends that to a second, separate model
+call (`agent.review_iphone_crop`, its own system prompt + `submit_review` tool schema) that judges
+the actual output pixels, not the model's own description of a hypothetical crop. This matters:
+the failures above were cases where the first-pass model's reasoning sounded right but didn't match
+what the rendered crop actually looked like -- grounding the second call in the real output instead
+of abstract coordinates is what let it catch what prompt wording alone couldn't.
+
+If rejected, the decision is logged with a `gated_out` flag and `gate_worthwhile`/`gate_reason`
+fields, and `apply_crop` is skipped for it (nothing written to disk). Fails open (approves) if the
+review call itself errors, so a network hiccup can't silently discard a good export. Runs as a
+plain blocking call in the batch runner's main thread rather than through the thread pool -- this
+doesn't serialize the rest of the batch, since Python releases the GIL during network I/O and the
+pool's worker threads keep making progress on other jobs in parallel; the only cost is that the
+main loop's bookkeeping for *this* image's finalization is delayed by one extra network round trip.
+
+Verified against the seven images that exposed the two failures: the gate correctly rejected the
+empty-hillside cow (`_DSC3394.jpg`) and the tower+street blend (`_DSC2968_alt2.jpg`) that survived
+prompt tuning, and correctly rejected a `_DSC3424.jpg` candidate that (on manual re-inspection of
+the raw pixels) genuinely did cut off the subject's face -- a crop that had been mis-judged as good
+in an earlier manual review pass, underscoring that grounding the check in actual rendered pixels
+catches mistakes a text-only judgment (mine included) can miss.
+
+Cost impact: only fires for `worthwhile: true` iphone decisions (not all 5 targets), so it's a
+fraction of total calls, not a doubling -- not yet measured in aggregate token/time terms across a
+full batch.
 
 ## Open items
 
 - Exact wording/examples for the system prompt will likely need further iteration.
-- Self-review pass (feed the cropped result back to the model as a second call, ask if it's good):
-  doesn't require an agent framework -- just one more explicit API call with the cropped preview.
-  Deliberately not implemented yet; revisit if prompt guidance + the flags.py heuristics aren't
-  catching enough on larger batches, since it roughly doubles/triples cost per image.
-- Parallelizing batch runs across images: open question is whether oMLX serializes requests to a
-  loaded model server-side, which would mean client-side concurrency doesn't add throughput. Worth
-  testing before investing effort. Not started.
+- Whether the review gate itself needs prompt tuning over time (it's a fresh, unvalidated-at-scale
+  prompt) -- watch for it over- or under-rejecting once run across a full batch.
 - Folder/output naming convention beyond `_altN` suffixes not otherwise revisited.

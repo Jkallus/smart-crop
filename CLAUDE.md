@@ -21,23 +21,31 @@ for each; deterministic Python does the pixel math. Replaces a manual Lightroom 
   `scale=1.0`, e.g. a 4:3 drone photo against `ipad`), it skips the decode/encode entirely and
   `shutil.copy2`s the original bytes instead.
 - `preview.py` -- downsizes + base64-encodes an image for the vision model; the full-res original
-  is only ever touched by `apply_crop`, never sent to the model.
+  is only ever touched by `apply_crop`, never sent to the model. `preview_data_url()` previews the
+  whole source; `crop_preview_data_url()` previews just a pixel box, used by the review gate below.
 - `backends.py` -- named model configs (`BACKENDS` dict). Add a new model by adding an entry here.
 - `agent.py` -- the system prompt, tool schema, and `get_crop_plan()` (one model, one image ->
-  `dict[str, list[CropDecision]]`). Also a single-backend CLI. All 5 targets (and any `iphone`
-  multi-candidate entries) come back from a single tool call in a single model request -- the
-  model reasons about all targets holistically in one context, never one call per target.
+  `CropPlanResult`, wrapping `plan: dict[str, list[CropDecision]]` plus `malformed` decisions and
+  token `usage`). Also a single-backend CLI. All 5 targets (and any `iphone` multi-candidate
+  entries) come back from a single tool call in a single model request -- the model reasons about
+  all targets holistically in one context, never one call per target. Also `gate_iphone_crop()` /
+  `review_iphone_crop()`: a second-pass review call, `iphone` only, shown just the rendered crop
+  (not the source) and asked whether it's actually a strong standalone portrait -- see
+  agent_spec.md's "Second-pass review gate" section for why and how this differs from the
+  first-pass prompt.
 - `compare.py` -- runs N backends over a batch, pipelined per-image (crops + logs an image as soon
   as every requested backend has returned for it, rather than waiting for the whole batch to finish
   analysis before cropping anything), writes a JSONL decision log, CLI entry point for real batches.
   Every line has a `"type"` field: `run_meta` (one header line: git commit, backend/model names,
   `max_workers`, image count, start time -- so a log file is self-describing without cross-
   referencing `HANDOFF.md`), `decision` (the normal per-target rows, now also carrying `source_w`/
-  `source_h`, `duration_s`, and `prompt_tokens`/`completion_tokens` alongside `flags.py`-derived
-  review flags), `call_failed` (a backend call that raised, instead of being lost to console
-  scrollback), or `malformed_decision` (a raw decision dict the model returned with an unrecognized
-  `target`, previously only printed and discarded). Also prints a per-backend avg/min/max duration
-  and total token summary at the end of a run.
+  `source_h`, `duration_s`, `prompt_tokens`/`completion_tokens`, and -- for `iphone` -- 
+  `gate_worthwhile`/`gate_reason` from the review gate, alongside `flags.py`-derived review flags
+  including `gated_out` when the gate overrides a first-pass `worthwhile: true`), `call_failed` (a
+  backend call that raised, instead of being lost to console scrollback), or `malformed_decision`
+  (a raw decision dict the model returned with an unrecognized `target`, previously only printed
+  and discarded). Also prints a per-backend avg/min/max duration and total token summary at the end
+  of a run.
 - `flags.py` -- cheap, geometry-only heuristics (no image content inspection) for flagging
   decisions worth a human look: unused coordinates, low scale, edge anchors, cross-backend
   disagreement. This is what makes batches of hundreds of images tractable to review.
@@ -76,10 +84,12 @@ for each; deterministic Python does the pixel math. Replaces a manual Lightroom 
   output task (~20k tokens/call, no measured quality benefit) -- disabled via
   `Backend.extra_body = {"chat_template_kwargs": {"enable_thinking": False}}`. If you add another
   Qwen3-family backend, it likely needs the same treatment.
-- `flags.py`'s `disagreement:cx`/`disagreement:cy` threshold (0.15) can over-count: the same
-  underlying behavioral difference between two models often repeats identically across
-  `tv`/`macbook`/`ultrawide` for one image, since they share the same crop axis. Not yet
-  de-duplicated -- see `HANDOFF.md` for current status.
+- `flags.py`'s `disagreement:cx`/`disagreement:cy` used to fire even when the axis had zero slack
+  (both backends' boxes spanning the full source dimension regardless of the coordinate value) --
+  fixed by suppressing the flag unless at least one backend's box actually has slack on that axis
+  (`max_crop_box()`, shared with `crop_box()`). The same underlying behavioral difference between
+  two models can still repeat identically across `tv`/`macbook`/`ultrawide` for one image when the
+  axis *does* matter, since they share the same crop axis -- that part is not de-duplicated.
 - Gemma has a reasoning bug on portrait-source-to-landscape-target crops: it sometimes rejects
   `tv`/`macbook`/`ultrawide`/`ipad` on a portrait-orientation source with reasoning like "would
   require extending the frame," which is factually wrong -- that crop just trims height hard, it

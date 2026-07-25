@@ -8,10 +8,12 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from PIL import Image
+
 from smart_crop.backends import BACKENDS, Backend, client_for
-from smart_crop.crop import CropDecision, ResolutionFloorError, apply_crop
-from smart_crop.preview import preview_data_url
-from smart_crop.ratios import TARGETS
+from smart_crop.crop import CropDecision, ResolutionFloorError, apply_crop, crop_box
+from smart_crop.preview import crop_preview_data_url, preview_data_url
+from smart_crop.ratios import TARGETS, Target
 
 DEFAULT_BACKEND = BACKENDS["qwen"]
 
@@ -55,18 +57,35 @@ full-height crop is strongly preferred over a tighter zoomed one; never zoom pur
 composition of a slice that already works at scale 1.0. If no full-height slice works and zooming \
 doesn't rescue it either, set worthwhile false -- a mediocre crop is worse than no crop.
 
+Be a strict, human-like curator about worthwhile for iphone: a slice being geometrically coherent \
+is not enough on its own. The subject needs to be a clear, meaningful visual focus that fills a \
+real portion of the frame -- if the interesting content (an animal, a structure) is small and \
+distant within mostly empty grass, sky, water, or pavement, that is not a strong portrait even \
+though the slice is technically valid. Set worthwhile false in that case rather than exporting a \
+crop that's mostly empty space around a minor detail.
+
 If the frame contains a moving or discrete subject near where the crop would need to fall -- a \
 person or animal in motion, a vehicle -- do not choose a crop that would slice through the \
 subject's body to force it to fit. Prefer worthwhile=false over a crop that visibly bisects a \
-subject; a missing crop is better than one that looks like a mistake.
+subject; a missing crop is better than one that looks like a mistake. More generally, when a crop \
+boundary falls across a subject's body or a structure, prefer a natural breakpoint over an \
+arbitrary cut: for an animal, cut cleanly below the shoulders/neck or include the full body and \
+legs, not an arbitrary point through the torso or mid-leg; for a building, prefer a cut that \
+respects an architectural line (roofline, floor line) over one that clips through signage or \
+windows without reason. If every available crop position cuts awkwardly through the subject with \
+no natural breakpoint available, that's a legitimate case where nothing can be done well -- prefer \
+worthwhile=false over an awkward cut, unless the subject's single most essential, recognizable part \
+(e.g. an animal's head and face) is still fully included by some position.
 
 Occasionally a wide image contains two or more distinct, independently strong subjects far enough \
 apart that no single vertical slice can include both (e.g. two separate landmarks in the same \
 frame). In that case only, you may submit more than one iphone decision, each isolating one \
 subject, by including multiple entries with target="iphone" in decisions. Do this only when each \
-candidate would independently stand as a strong, complete crop on its own -- never as a way to \
-hedge between two mediocre options. Every other target (tv, macbook, ultrawide, ipad) must appear \
-exactly once.
+candidate would independently stand as a strong, complete crop on its own, focused on a single \
+coherent subject -- never as a way to hedge between two mediocre options, and never by blending two \
+loosely related scene elements (e.g. a building and unrelated street activity below it) into one \
+candidate that doesn't clearly belong together. Every other target (tv, macbook, ultrawide, ipad) \
+must appear exactly once.
 
 When zooming in (scale below 1.0) to isolate a subject, don't crop out an entire compositional \
 element that was present in the original frame -- e.g. all of the sky, or all of the foreground -- \
@@ -188,17 +207,119 @@ def get_crop_plan(image_path: Path, backend: Backend = DEFAULT_BACKEND) -> CropP
     return CropPlanResult(plan=plan, malformed=malformed, usage=usage)
 
 
+REVIEW_SYSTEM_PROMPT = """\
+You are reviewing a single candidate crop already produced for an iPhone portrait export \
+(9:19.5 aspect ratio). You are shown only the finished crop, not the original wider photo -- \
+judge it purely as a standalone photo, the way someone scrolling through exported photos would.
+
+Reject (worthwhile: false) if any of the following apply:
+- The subject is small, distant, or incidental within a frame that's mostly empty space (sky, \
+grass, water, pavement) -- it doesn't read as a photo *of* anything in particular, even if some \
+detail is technically visible somewhere in the frame.
+- The crop combines two visually disconnected elements (e.g. an architectural closeup on top and \
+unrelated street-level activity at the bottom) that don't cohere as one photographic subject.
+- The crop boundary cuts across a subject's body or a structure at an arbitrary, awkward point \
+rather than a natural breakpoint (e.g. mid-torso on an animal instead of below the shoulders, or \
+through signage/windows on a building instead of along a roofline).
+
+Otherwise, if this reads as a strong, coherent standalone portrait photo, approve it \
+(worthwhile: true). Call submit_review exactly once with your verdict and a one-sentence reason.\
+"""
+
+REVIEW_TOOL_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "submit_review",
+        "description": "Submit your verdict on whether this crop is a strong standalone portrait export.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "worthwhile": {"type": "boolean"},
+                "reason": {"type": "string"},
+            },
+            "required": ["worthwhile", "reason"],
+        },
+    },
+}
+
+
+def review_iphone_crop(
+    image_path: Path, box: tuple[int, int, int, int], backend: Backend
+) -> tuple[bool, str, dict | None]:
+    """Second-pass review of an already-rendered iphone crop, shown only the cropped pixels.
+
+    Grounds the worthwhile judgment in the actual output instead of the model's own description of
+    a hypothetical crop -- catches cases (small/distant subject in mostly empty space, two
+    disconnected elements blended together) that resisted first-pass prompt tuning alone.
+    """
+    client = client_for(backend)
+    data_url = crop_preview_data_url(image_path, box)
+
+    response = client.chat.completions.create(
+        model=backend.model,
+        messages=[
+            {"role": "system", "content": REVIEW_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": data_url}},
+                    {"type": "text", "text": "Review this candidate iPhone portrait crop."},
+                ],
+            },
+        ],
+        tools=[REVIEW_TOOL_SCHEMA],
+        tool_choice={"type": "function", "function": {"name": "submit_review"}},
+        extra_body=backend.extra_body,
+    )
+
+    tool_call = response.choices[0].message.tool_calls[0]
+    args = json.loads(tool_call.function.arguments)
+
+    usage = None
+    if response.usage is not None:
+        usage = {
+            "prompt_tokens": response.usage.prompt_tokens,
+            "completion_tokens": response.usage.completion_tokens,
+            "total_tokens": response.usage.total_tokens,
+        }
+
+    return bool(args.get("worthwhile", True)), args.get("reason", ""), usage
+
+
+def gate_iphone_crop(
+    image_path: Path, source_w: int, source_h: int, target: Target, decision: CropDecision, backend: Backend
+) -> tuple[bool, str, dict | None]:
+    """Run review_iphone_crop for one worthwhile iphone decision. Fails open (approves) if the
+    review call itself errors, so a network hiccup can't silently discard an otherwise-good export.
+    """
+    box = crop_box(source_w, source_h, target, decision)
+    try:
+        return review_iphone_crop(image_path, box, backend)
+    except Exception as e:
+        return True, f"review call failed, approved by default: {e}", None
+
+
 IMAGE_EXTENSIONS = {".jpg", ".jpeg"}
 
 
 def process_image(image_path: Path, output_dir: Path, backend: Backend = DEFAULT_BACKEND) -> None:
     plan = get_crop_plan(image_path, backend=backend).plan
 
+    with Image.open(image_path) as img:
+        source_w, source_h = img.width, img.height
+
     for target_name, decisions in plan.items():
         target = TARGETS[target_name]
         multi = len(decisions) > 1
         for i, decision in enumerate(decisions, 1):
             suffix = f"_alt{i}" if multi else ""
+
+            if target_name == "iphone" and decision.worthwhile:
+                approved, gate_reason, _ = gate_iphone_crop(image_path, source_w, source_h, target, decision, backend)
+                if not approved:
+                    print(f"  {target_name}{suffix}: gated out -- {gate_reason}  [{decision.reason}]")
+                    continue
+
             try:
                 result = apply_crop(image_path, target, decision, output_dir, suffix=suffix)
             except ResolutionFloorError as e:

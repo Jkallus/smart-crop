@@ -15,7 +15,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from smart_crop.agent import IMAGE_EXTENSIONS, get_crop_plan
+from smart_crop.agent import IMAGE_EXTENSIONS, gate_iphone_crop, get_crop_plan
 from smart_crop.backends import BACKENDS, Backend
 from smart_crop.crop import CropDecision, ResolutionFloorError, apply_crop, crop_box
 from smart_crop.flags import decision_flags, disagreement_flags
@@ -114,7 +114,30 @@ def _process_image(
                     "completion_tokens": backend_usage.get("completion_tokens"),
                 }
 
-                if decision.worthwhile:
+                export_ok = decision.worthwhile
+
+                # Second-pass review, iphone only: shows the model just the rendered crop (not the
+                # source) and asks whether it actually reads as a strong standalone portrait.
+                # Catches take-rate/blending judgment failures that resisted first-pass prompt
+                # tuning alone -- see agent_spec.md. Runs as a plain blocking call in the main
+                # thread; the executor's worker threads keep making progress on other jobs in
+                # parallel since Python releases the GIL during network I/O, so this doesn't
+                # serialize the rest of the batch, just this image's own finalization.
+                if target_name == "iphone" and decision.worthwhile:
+                    approved, gate_reason, gate_usage = gate_iphone_crop(
+                        image_path, source_w, source_h, target, decision, BACKENDS[backend_name]
+                    )
+                    entry["gate_worthwhile"] = approved
+                    entry["gate_reason"] = gate_reason
+                    if gate_usage:
+                        entry["gate_prompt_tokens"] = gate_usage.get("prompt_tokens")
+                        entry["gate_completion_tokens"] = gate_usage.get("completion_tokens")
+                    if not approved:
+                        flags = flags + ["gated_out"]
+                        entry["flags"] = flags
+                        export_ok = False
+
+                if export_ok:
                     entry["box"] = list(crop_box(source_w, source_h, target, decision))
                     try:
                         result = apply_crop(
