@@ -27,16 +27,25 @@ def _clamp(value: float, low: float, high: float) -> float:
     return max(low, min(value, high))
 
 
-def crop_box(source_w: int, source_h: int, target: Target, decision: CropDecision) -> tuple[int, int, int, int]:
-    """Compute the (left, top, right, bottom) pixel box for a crop decision."""
+def max_crop_box(source_w: int, source_h: int, target: Target) -> tuple[float, float]:
+    """The largest box at target's ratio that fits inside a source_w x source_h frame.
+
+    One of the two returned dimensions always equals the matching source dimension -- shared by
+    crop_box and flags.py, which both need to know which axis (if either) has any room to move.
+    """
     source_ratio = source_w / source_h
 
     if target.ratio > source_ratio:
-        max_w, max_h = source_w, source_w / target.ratio
+        return source_w, source_w / target.ratio
     elif target.ratio < source_ratio:
-        max_w, max_h = source_h * target.ratio, source_h
+        return source_h * target.ratio, source_h
     else:
-        max_w, max_h = source_w, source_h
+        return source_w, source_h
+
+
+def crop_box(source_w: int, source_h: int, target: Target, decision: CropDecision) -> tuple[int, int, int, int]:
+    """Compute the (left, top, right, bottom) pixel box for a crop decision."""
+    max_w, max_h = max_crop_box(source_w, source_h, target)
 
     box_w = max_w * decision.scale
     box_h = max_h * decision.scale

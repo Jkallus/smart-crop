@@ -4,7 +4,7 @@ Cheap, geometry-based checks only -- no image content inspection. Meant to cut a
 hundreds of decisions down to the handful actually worth eyeballing.
 """
 
-from smart_crop.crop import CropDecision
+from smart_crop.crop import CropDecision, max_crop_box
 from smart_crop.ratios import Target
 
 LOW_SCALE_THRESHOLD = 0.5
@@ -19,14 +19,7 @@ def decision_flags(decision: CropDecision, target: Target, source_w: int, source
         return ["skipped"]
 
     flags = []
-    source_ratio = source_w / source_h
-
-    if target.ratio > source_ratio:
-        max_w, max_h = source_w, source_w / target.ratio
-    elif target.ratio < source_ratio:
-        max_w, max_h = source_h * target.ratio, source_h
-    else:
-        max_w, max_h = source_w, source_h
+    max_w, max_h = max_crop_box(source_w, source_h, target)
 
     # At scale 1.0, an axis with zero slack means the corresponding coordinate has no effect.
     # A model setting it away from 0.5 anyway is a sign it doesn't understand its own output.
@@ -47,7 +40,9 @@ def decision_flags(decision: CropDecision, target: Target, source_w: int, source
     return flags
 
 
-def disagreement_flags(decisions_by_backend: dict[str, list[CropDecision]]) -> list[str]:
+def disagreement_flags(
+    decisions_by_backend: dict[str, list[CropDecision]], target: Target, source_w: int, source_h: int
+) -> list[str]:
     """Flags from comparing multiple backends' decisions for the same image/target.
 
     Only compares fine-grained cx/cy/scale when every backend proposed exactly one candidate --
@@ -75,9 +70,16 @@ def disagreement_flags(decisions_by_backend: dict[str, list[CropDecision]]) -> l
     cy_spread = max(d.cy for d in worthwhile_decisions) - min(d.cy for d in worthwhile_decisions)
     scale_spread = max(d.scale for d in worthwhile_decisions) - min(d.scale for d in worthwhile_decisions)
 
-    if cx_spread > DISAGREEMENT_CX_CY:
+    # A cx/cy spread only reflects a real difference in output pixels if at least one backend's box
+    # actually has slack on that axis -- otherwise both backends' boxes span the full source
+    # dimension regardless of cx/cy, and "disagreeing" on an ignored coordinate is noise, not signal.
+    max_w, max_h = max_crop_box(source_w, source_h, target)
+    cx_matters = any(d.scale * max_w < source_w - 0.5 for d in worthwhile_decisions)
+    cy_matters = any(d.scale * max_h < source_h - 0.5 for d in worthwhile_decisions)
+
+    if cx_spread > DISAGREEMENT_CX_CY and cx_matters:
         flags.append("disagreement:cx")
-    if cy_spread > DISAGREEMENT_CX_CY:
+    if cy_spread > DISAGREEMENT_CX_CY and cy_matters:
         flags.append("disagreement:cy")
     if scale_spread > DISAGREEMENT_SCALE:
         flags.append("disagreement:scale")

@@ -81,7 +81,7 @@ def _process_image(
 
     for target_name, target in TARGETS.items():
         by_backend = {name: plan[target_name] for name, plan in plans.items() if target_name in plan}
-        cross_flags = disagreement_flags(by_backend)
+        cross_flags = disagreement_flags(by_backend, target, source_w, source_h)
 
         for backend_name, decisions in by_backend.items():
             multi = len(decisions) > 1
