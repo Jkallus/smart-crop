@@ -5,6 +5,7 @@ See agent_spec.md for the schema and reasoning this is built on.
 
 import argparse
 import json
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from smart_crop.backends import BACKENDS, Backend, client_for
@@ -114,7 +115,17 @@ TOOL_SCHEMA = {
 }
 
 
-def get_crop_plan(image_path: Path, backend: Backend = DEFAULT_BACKEND) -> dict[str, list[CropDecision]]:
+@dataclass
+class CropPlanResult:
+    plan: dict[str, list[CropDecision]]
+    # Raw decision dicts whose "target" wasn't one of the five known targets -- kept instead of
+    # only printed, so a batch run can log them for post-hoc debugging instead of losing them to
+    # console scrollback.
+    malformed: list[dict] = field(default_factory=list)
+    usage: dict | None = None  # {"prompt_tokens", "completion_tokens", "total_tokens"}, if reported
+
+
+def get_crop_plan(image_path: Path, backend: Backend = DEFAULT_BACKEND) -> CropPlanResult:
     client = client_for(backend)
     data_url = preview_data_url(image_path)
 
@@ -138,11 +149,21 @@ def get_crop_plan(image_path: Path, backend: Backend = DEFAULT_BACKEND) -> dict[
     tool_call = response.choices[0].message.tool_calls[0]
     args = json.loads(tool_call.function.arguments)
 
+    usage = None
+    if response.usage is not None:
+        usage = {
+            "prompt_tokens": response.usage.prompt_tokens,
+            "completion_tokens": response.usage.completion_tokens,
+            "total_tokens": response.usage.total_tokens,
+        }
+
     plan: dict[str, list[CropDecision]] = {}
+    malformed: list[dict] = []
     for d in args["decisions"]:
         target = d.get("target")
         if target not in TARGETS:
             print(f"  malformed decision, skipping: {d}")
+            malformed.append(d)
             continue
         plan.setdefault(target, []).append(
             CropDecision(
@@ -156,14 +177,14 @@ def get_crop_plan(image_path: Path, backend: Backend = DEFAULT_BACKEND) -> dict[
                 reason=d.get("reason", ""),
             )
         )
-    return plan
+    return CropPlanResult(plan=plan, malformed=malformed, usage=usage)
 
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg"}
 
 
 def process_image(image_path: Path, output_dir: Path, backend: Backend = DEFAULT_BACKEND) -> None:
-    plan = get_crop_plan(image_path, backend=backend)
+    plan = get_crop_plan(image_path, backend=backend).plan
 
     for target_name, decisions in plan.items():
         target = TARGETS[target_name]

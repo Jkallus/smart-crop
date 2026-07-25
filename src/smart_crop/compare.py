@@ -6,8 +6,11 @@ Meant for batches too large to eyeball -- flags.py derives cheap, geometry-only 
 
 import argparse
 import json
+import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
 from PIL import Image
@@ -21,16 +24,43 @@ from smart_crop.ratios import TARGETS
 MAX_WORKERS = 8  # benchmarked: ~2-3x throughput vs sequential with both models resident in oMLX
 
 
-def _timed_get_crop_plan(image_path: Path, backend: Backend) -> tuple[dict[str, list[CropDecision]], float]:
+@dataclass
+class _CallResult:
+    plan: dict[str, list[CropDecision]] | None
+    malformed: list[dict] = field(default_factory=list)
+    usage: dict | None = None
+    duration_s: float = 0.0
+    error: str | None = None
+
+
+def _timed_get_crop_plan(image_path: Path, backend: Backend) -> _CallResult:
     start = time.monotonic()
-    plan = get_crop_plan(image_path, backend)
-    return plan, time.monotonic() - start
+    try:
+        result = get_crop_plan(image_path, backend)
+        return _CallResult(
+            plan=result.plan, malformed=result.malformed, usage=result.usage, duration_s=time.monotonic() - start
+        )
+    except Exception as e:
+        # Caught here (not left to propagate through future.result()) so a single bad call still
+        # yields a duration and an error string we can write to the log, instead of a batch run
+        # losing the failure to console scrollback with no durable record.
+        return _CallResult(plan=None, duration_s=time.monotonic() - start, error=str(e))
+
+
+def _git_commit_hash() -> str | None:
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=Path(__file__).parent, text=True, stderr=subprocess.DEVNULL
+        ).strip()
+    except Exception:
+        return None
 
 
 def _process_image(
     image_path: Path,
     plans: dict[str, dict[str, list[CropDecision]]],
     durations: dict[str, float],
+    usage: dict[str, dict],
     output_dir: Path,
     log,
 ) -> tuple[int, list[dict]]:
@@ -62,7 +92,9 @@ def _process_image(
                 if multi:
                     flags = flags + ["multiple_candidates"]
 
+                backend_usage = usage.get(backend_name) or {}
                 entry = {
+                    "type": "decision",
                     "image": image_path.name,
                     "backend": backend_name,
                     "target": target_name + suffix,
@@ -73,9 +105,13 @@ def _process_image(
                     "reason": decision.reason,
                     "flags": flags,
                     "output_path": None,
-                    # seconds for the single get_crop_plan call that produced all of this backend's
-                    # decisions for this image -- same value repeated across its target rows.
+                    "source_w": source_w,
+                    "source_h": source_h,
+                    # seconds/tokens for the single get_crop_plan call that produced all of this
+                    # backend's decisions for this image -- same values repeated across its target rows.
                     "duration_s": round(durations[backend_name], 2) if backend_name in durations else None,
+                    "prompt_tokens": backend_usage.get("prompt_tokens"),
+                    "completion_tokens": backend_usage.get("completion_tokens"),
                 }
 
                 if decision.worthwhile:
@@ -124,27 +160,70 @@ def run_batch(
     path_by_name = {p.name: p for p in image_paths}
     plans_by_image: dict[str, dict[str, dict[str, list[CropDecision]]]] = {}
     durations_by_image: dict[str, dict[str, float]] = {}
+    usage_by_image: dict[str, dict[str, dict]] = {}
     all_durations: dict[str, list[float]] = {name: [] for name in backend_names}
+    all_usage: dict[str, list[dict]] = {name: [] for name in backend_names}
     pending_backends: dict[str, set[str]] = {p.name: set(backend_names) for p in image_paths}
 
     print(f"Dispatching {len(jobs)} jobs across {max_workers} workers, pipelined per-image...", flush=True)
 
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with open(log_path, "w") as log, ThreadPoolExecutor(max_workers=max_workers) as ex:
+        # Self-describing run header -- without this, comparing two log files months apart means
+        # cross-referencing HANDOFF.md notes to guess which prompt/code version produced which.
+        log.write(
+            json.dumps(
+                {
+                    "type": "run_meta",
+                    "started_at": datetime.now(timezone.utc).isoformat(),
+                    "git_commit": _git_commit_hash(),
+                    "backends": [{"name": b.name, "model": b.model} for b in backends],
+                    "max_workers": max_workers,
+                    "image_count": len(image_paths),
+                }
+            )
+            + "\n"
+        )
+        log.flush()
+
         futures = {
             ex.submit(_timed_get_crop_plan, image_path, backend): (image_path, backend) for image_path, backend in jobs
         }
         for n, future in enumerate(as_completed(futures), 1):
             image_path, backend = futures[future]
             name = image_path.name
-            try:
-                plan, duration = future.result()
-                plans_by_image.setdefault(name, {})[backend.name] = plan
-                durations_by_image.setdefault(name, {})[backend.name] = duration
-                all_durations[backend.name].append(duration)
-                print(f"  [{n}/{len(jobs)}] {backend.name}/{name}: ok ({duration:.1f}s)", flush=True)
-            except Exception as e:
-                print(f"  [{n}/{len(jobs)}] {backend.name}/{name}: FAILED -- {e}", flush=True)
+            call = future.result()
+
+            if call.error is not None:
+                print(f"  [{n}/{len(jobs)}] {backend.name}/{name}: FAILED ({call.duration_s:.1f}s) -- {call.error}", flush=True)
+                log.write(
+                    json.dumps(
+                        {
+                            "type": "call_failed",
+                            "image": name,
+                            "backend": backend.name,
+                            "duration_s": round(call.duration_s, 2),
+                            "error": call.error,
+                        }
+                    )
+                    + "\n"
+                )
+                log.flush()
+            else:
+                plans_by_image.setdefault(name, {})[backend.name] = call.plan
+                durations_by_image.setdefault(name, {})[backend.name] = call.duration_s
+                all_durations[backend.name].append(call.duration_s)
+                if call.usage:
+                    usage_by_image.setdefault(name, {})[backend.name] = call.usage
+                    all_usage[backend.name].append(call.usage)
+                for raw in call.malformed:
+                    log.write(
+                        json.dumps({"type": "malformed_decision", "image": name, "backend": backend.name, "raw": raw})
+                        + "\n"
+                    )
+                if call.malformed:
+                    log.flush()
+                print(f"  [{n}/{len(jobs)}] {backend.name}/{name}: ok ({call.duration_s:.1f}s)", flush=True)
 
             pending_backends[name].discard(backend.name)
             if pending_backends[name]:
@@ -157,6 +236,7 @@ def run_batch(
                 path_by_name[name],
                 plans_by_image.pop(name, {}),
                 durations_by_image.pop(name, {}),
+                usage_by_image.pop(name, {}),
                 output_dir,
                 log,
             )
@@ -164,10 +244,18 @@ def run_batch(
             flagged.extend(image_flagged)
 
     print(f"\n{total} decisions logged to {log_path}, {len(flagged)} flagged for review.", flush=True)
-    for name, durs in sorted(all_durations.items()):
-        if durs:
-            print(f"  {name}: avg {sum(durs) / len(durs):.1f}s/call over {len(durs)} calls "
-                  f"(min {min(durs):.1f}s, max {max(durs):.1f}s)", flush=True)
+    for name in sorted(backend_names):
+        durs = all_durations[name]
+        if not durs:
+            continue
+        print(f"  {name}: avg {sum(durs) / len(durs):.1f}s/call over {len(durs)} calls "
+              f"(min {min(durs):.1f}s, max {max(durs):.1f}s)", flush=True)
+        usages = all_usage[name]
+        if usages:
+            total_prompt = sum(u["prompt_tokens"] for u in usages)
+            total_completion = sum(u["completion_tokens"] for u in usages)
+            print(f"    tokens: {total_prompt} prompt + {total_completion} completion "
+                  f"({total_completion / len(usages):.0f} completion/call avg)", flush=True)
 
 
 def main() -> None:

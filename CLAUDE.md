@@ -29,9 +29,15 @@ for each; deterministic Python does the pixel math. Replaces a manual Lightroom 
   model reasons about all targets holistically in one context, never one call per target.
 - `compare.py` -- runs N backends over a batch, pipelined per-image (crops + logs an image as soon
   as every requested backend has returned for it, rather than waiting for the whole batch to finish
-  analysis before cropping anything), writes a JSONL decision log with `flags.py`-derived review
-  flags and per-call `duration_s` timing (plus a per-backend avg/min/max summary at the end), CLI
-  entry point for real batches.
+  analysis before cropping anything), writes a JSONL decision log, CLI entry point for real batches.
+  Every line has a `"type"` field: `run_meta` (one header line: git commit, backend/model names,
+  `max_workers`, image count, start time -- so a log file is self-describing without cross-
+  referencing `HANDOFF.md`), `decision` (the normal per-target rows, now also carrying `source_w`/
+  `source_h`, `duration_s`, and `prompt_tokens`/`completion_tokens` alongside `flags.py`-derived
+  review flags), `call_failed` (a backend call that raised, instead of being lost to console
+  scrollback), or `malformed_decision` (a raw decision dict the model returned with an unrecognized
+  `target`, previously only printed and discarded). Also prints a per-backend avg/min/max duration
+  and total token summary at the end of a run.
 - `flags.py` -- cheap, geometry-only heuristics (no image content inspection) for flagging
   decisions worth a human look: unused coordinates, low scale, edge anchors, cross-backend
   disagreement. This is what makes batches of hundreds of images tractable to review.
