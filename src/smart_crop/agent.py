@@ -181,9 +181,25 @@ def get_crop_plan(image_path: Path, backend: Backend = DEFAULT_BACKEND) -> CropP
             "total_tokens": response.usage.total_tokens,
         }
 
+    plan, malformed = _parse_decisions(args)
+    return CropPlanResult(plan=plan, malformed=malformed, usage=usage)
+
+
+def _parse_decisions(args: dict) -> tuple[dict[str, list[CropDecision]], list[dict]]:
+    """Pure parsing logic for a submit_crop_plan tool call's arguments -- split out from
+    get_crop_plan so it's testable without mocking the API call."""
     plan: dict[str, list[CropDecision]] = {}
     malformed: list[dict] = []
-    for d in args["decisions"]:
+    decisions = args.get("decisions")
+    if not isinstance(decisions, list):
+        # The model occasionally returns "decisions" as a JSON-encoded string instead of an actual
+        # array -- iterating that directly would walk it character by character, logging thousands
+        # of single-character "malformed decisions" for one bad response. Treat the whole response
+        # as malformed instead.
+        print(f"  malformed response, \"decisions\" is not a list: {decisions!r}")
+        return plan, [{"decisions": decisions}]
+
+    for d in decisions:
         # The model occasionally returns a decisions array with a non-dict element (e.g. a bare
         # string) instead of every entry being a proper object -- treat that as malformed too,
         # rather than crashing the whole call on d.get().
@@ -204,7 +220,7 @@ def get_crop_plan(image_path: Path, backend: Backend = DEFAULT_BACKEND) -> CropP
                 reason=d.get("reason", ""),
             )
         )
-    return CropPlanResult(plan=plan, malformed=malformed, usage=usage)
+    return plan, malformed
 
 
 REVIEW_SYSTEM_PROMPT = """\
