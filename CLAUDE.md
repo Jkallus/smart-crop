@@ -73,7 +73,9 @@ for each; deterministic Python does the pixel math. Replaces a manual Lightroom 
   so backend-major ordering would starve the per-image pipelining (nothing becomes "ready" to crop
   until nearly a full backend pass completes).
 - Sample/test images (loose `.jpg` files, `test_batch/`) are gitignored -- don't commit real photos
-  to this repo.
+  to this repo. One deliberate exception: `docs/example/` (README illustration -- one source image
+  and its 5 crops, downsized to ~1200px long edge for repo size), carved out via a `.gitignore`
+  negation. Don't add other images there without the same downsizing treatment.
 
 ## Known rough edges
 

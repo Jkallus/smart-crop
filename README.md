@@ -29,6 +29,29 @@ export OMLX_API_KEY=<your key>
 | `ipad` | 4:3 | iPad screen |
 | `iphone` | 9:19.5 | iPhone portrait |
 
+## Example
+
+One 6016x4016 (3:2) source, and the crop the pipeline produced for each target -- all five were
+judged worth producing for this image, which isn't always the case (see `agent_spec.md` for when a
+target gets skipped). Images here are downsized for the repo; real output stays at full source
+resolution except where a target's own aspect ratio requires cropping.
+
+| Original | |
+|---|---|
+| ![original](docs/example/original.jpg) | |
+
+| `tv` (16:9) | `macbook` (16:10) |
+|---|---|
+| ![tv](docs/example/tv.jpg) | ![macbook](docs/example/macbook.jpg) |
+
+| `ultrawide` (5120:2160) | `ipad` (4:3) |
+|---|---|
+| ![ultrawide](docs/example/ultrawide.jpg) | ![ipad](docs/example/ipad.jpg) |
+
+| `iphone` (9:19.5) |
+|---|
+| ![iphone](docs/example/iphone.jpg) |
+
 ## Usage
 
 ### Single image or folder, one model

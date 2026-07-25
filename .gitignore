@@ -14,3 +14,6 @@ test_batch_run.log
 *.jpeg
 *.JPG
 *.JPEG
+
+# exception: small, downsized example images for the README (see docs/example/)
+!docs/example/*.jpg
